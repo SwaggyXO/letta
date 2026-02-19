@@ -76,8 +76,22 @@ class OllamaProvider(OpenAIProvider):
             caps = details.get("capabilities") or []
             if not isinstance(caps, list):
                 caps = []
-            if "tools" not in [str(c).lower() for c in caps]:
-                # Only include models that declare tools support
+            caps_lower = [str(c).lower() for c in caps]
+            # Do not hard-filter on 'tools'. Ollama does not reliably populate the
+            # capabilities field across all model families — phi3.5 reports only
+            # ['completion'], deepseek-r1 reports ['completion', 'thinking'], yet
+            # both fully support tool/function calling via the OpenAI-compat proxy.
+            # Only skip models that explicitly declare *no* completion ability at all
+            # (e.g. pure embedding models like nomic-embed-text, or vision-only
+            # models that truly cannot do text completion).
+            # Models with an empty capabilities list (older Ollama builds that
+            # pre-date the capabilities field) are kept unchanged.
+            # Fixes: https://github.com/letta-ai/letta/issues/3121
+            if caps_lower and "completion" not in caps_lower and "tools" not in caps_lower:
+                logger.warning(
+                    f"Skipping Ollama model {model_name!r}: capabilities declared "
+                    f"as {caps_lower!r} with no completion or tools support."
+                )
                 continue
 
             # Derive context window from /api/show model_info if available
@@ -196,7 +210,11 @@ class OllamaProvider(OpenAIProvider):
     async def _get_model_details_async(self, model_name: str) -> dict | None:
         """Get detailed information for a specific model from /api/show."""
         endpoint = f"{self.raw_base_url}/api/show"
-        payload = {"name": model_name}
+        # Ollama renamed the /api/show request field from 'name' to 'model'
+        # (current documented API, ref: https://docs.ollama.com/api-reference/show-model-details).
+        # We send both keys for backward compatibility with older Ollama builds
+        # where 'model' is not recognized.
+        payload = {"model": model_name, "name": model_name}
 
         try:
             timeout = aiohttp.ClientTimeout(total=2.0)
